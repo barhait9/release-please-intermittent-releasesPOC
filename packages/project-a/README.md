@@ -1,4 +1,4 @@
 # Project A
 
 A minimal package for release-please testing.
-post feature 2
+Post feature 1 readme post feature 2
