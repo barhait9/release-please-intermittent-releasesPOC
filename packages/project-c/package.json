@@ -1,0 +1,8 @@
+{
+  "name": "@poc/project-c",
+  "version": "0.1.0",
+  "description": "Project C - release-please beta branch POC",
+  "main": "index.js",
+  "scripts": {},
+  "license": "MIT"
+}

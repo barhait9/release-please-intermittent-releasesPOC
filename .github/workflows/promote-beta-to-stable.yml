@@ -1,0 +1,97 @@
+name: Promote Beta to Stable
+
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - main
+
+jobs:
+  promote:
+    # Only run when a PR from the beta branch is actually merged
+    if: github.event.pull_request.merged == true && github.event.pull_request.head.ref == 'beta'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Promote beta versions to stable
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          new_manifest='{}'
+
+          while IFS= read -r entry; do
+            pkg=$(echo "$entry" | jq -r '.key')
+            beta_ver=$(echo "$entry" | jq -r '.value')
+            stable_ver=$(echo "$beta_ver" | sed 's/-beta.*//')
+
+            echo "Promoting $pkg: $beta_ver → $stable_ver"
+
+            # Update package.json version
+            if [ -f "${pkg}/package.json" ]; then
+              jq --arg v "$stable_ver" '.version = $v' "${pkg}/package.json" > tmp.json
+              mv tmp.json "${pkg}/package.json"
+            fi
+
+            new_manifest=$(echo "$new_manifest" | jq --arg k "$pkg" --arg v "$stable_ver" '.[$k] = $v')
+          done < <(jq -c 'to_entries[]' .release-please-manifest-beta.json)
+
+          # Write updated main manifest
+          echo "$new_manifest" | jq '.' > .release-please-manifest.json
+
+          git add .
+          git commit -m "chore: promote beta releases to stable"
+          git push origin main
+
+      - name: Create tags and GitHub releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          while IFS= read -r entry; do
+            pkg=$(echo "$entry" | jq -r '.key')
+            beta_ver=$(echo "$entry" | jq -r '.value')
+            stable_ver=$(echo "$beta_ver" | sed 's/-beta.*//')
+            pkg_name=$(basename "$pkg")
+            tag="${pkg_name}-v${stable_ver}"
+
+            echo "Tagging and releasing: $tag"
+            git tag "$tag" || echo "Tag $tag already exists, skipping"
+            git push origin "$tag" || echo "Tag $tag already pushed, skipping"
+
+            gh release create "$tag" \
+              --title "${pkg_name} v${stable_ver}" \
+              --generate-notes \
+              || echo "Release $tag already exists, skipping"
+
+          done < <(jq -c 'to_entries[]' .release-please-manifest-beta.json)
+
+      - name: Reset beta manifest to new stable base
+        run: |
+          # Capture the stable manifest we just wrote on main
+          STABLE_MANIFEST=$(cat .release-please-manifest.json)
+
+          # Switch to beta and reset its manifest so the next beta cycle
+          # calculates versions correctly from the stable base
+          git fetch origin beta
+          git checkout -b temp-beta-reset origin/beta
+
+          echo "$STABLE_MANIFEST" > .release-please-manifest-beta.json
+
+          if ! git diff --quiet .release-please-manifest-beta.json; then
+            git add .release-please-manifest-beta.json
+            git commit -m "chore: reset beta manifest to stable base after promotion"
+            git push origin temp-beta-reset:beta
+          else
+            echo "Beta manifest already at stable base, no reset needed"
+          fi
